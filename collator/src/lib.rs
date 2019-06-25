@@ -53,14 +53,18 @@ use futures::{future, Stream, Future, IntoFuture};
 use log::{info, warn};
 use client::BlockchainEvents;
 use primitives::{ed25519, Pair};
-use polkadot_primitives::{BlockId, SessionKey, Hash, Block};
-use polkadot_primitives::parachain::{
-	self, BlockData, DutyRoster, HeadData, ConsolidatedIngress, Message, Id as ParaId, Extrinsic,
-	PoVBlock,
+use polkadot_primitives::{
+	BlockId, SessionKey, Hash, Block,
+	parachain::{
+		self, BlockData, DutyRoster, HeadData, ConsolidatedIngress, Message, Id as ParaId, Extrinsic,
+		PoVBlock, Status as ParachainStatus,
+	}
 };
-use polkadot_cli::{PolkadotService, CustomConfiguration, ParachainHost};
-use polkadot_cli::{Worker, IntoExit, ProvideRuntimeApi, TaskExecutor};
-use polkadot_network::validation::{SessionParams, self};
+use polkadot_cli::{
+	Worker, IntoExit, ProvideRuntimeApi, TaskExecutor, PolkadotService, CustomConfiguration,
+	ParachainHost,
+};
+use polkadot_network::validation::{SessionParams, ValidationNetwork};
 use polkadot_network::NetworkService;
 use tokio::timer::Timeout;
 use consensus_common::SelectChain;
@@ -68,11 +72,40 @@ use aura::AuraApi;
 
 pub use polkadot_cli::VersionInfo;
 pub use polkadot_network::validation::Incoming;
+pub use polkadot_validation::SignedStatement;
+pub use polkadot_primitives::parachain::CollatorId;
+pub use substrate_network::PeerId;
 
 const COLLATION_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The `ValidationNetwork` used by the collator.
-pub type ValidationNetwork<P, E> = validation::ValidationNetwork<P, E, NetworkService, TaskExecutor>;
+/// An abstraction over the `Network` with useful functions for a `Collator`.
+pub trait Network {
+	/// Convert the given `CollatorId` to a `PeerId`.
+	fn collator_id_to_peer_id(&self, collator_id: CollatorId) ->
+		Box<dyn Future<Item=Option<PeerId>, Error=()> + Send>;
+
+	/// Create a `Stream` of checked statements for the given `relay_parent`.
+	///
+	/// The returned stream will not terminate, so it is required to make sure that the stream is
+	/// dropped when it is not required anymore. Otherwise, it will stick around in memory
+	/// infinitely.
+	fn checked_statements(&self, relay_parent: Hash) -> Box<dyn Stream<Item=SignedStatement, Error=()>>;
+}
+
+impl<P, E> Network for ValidationNetwork<P, E, NetworkService, TaskExecutor> where
+	P: 'static,
+	E: 'static,
+{
+	fn collator_id_to_peer_id(&self, collator_id: CollatorId) ->
+		Box<dyn Future<Item=Option<PeerId>, Error=()> + Send>
+	{
+		Box::new(Self::collator_id_to_peer_id(self, collator_id))
+	}
+
+	fn checked_statements(&self, relay_parent: Hash) -> Box<dyn Stream<Item=SignedStatement, Error=()>> {
+		Box::new(Self::checked_statements(self, relay_parent))
+	}
+}
 
 /// Error to return when the head data was invalid.
 #[derive(Clone, Copy, Debug)]
@@ -102,10 +135,7 @@ pub trait BuildParachainContext {
 	type ParachainContext: self::ParachainContext;
 
 	/// Build the `ParachainContext`.
-	fn build<P, E>(
-		self,
-		validation_network: &ValidationNetwork<P, E>
-	) -> Result<Self::ParachainContext, ()>;
+	fn build(self, network: Arc<dyn Network>) -> Result<Self::ParachainContext, ()>;
 }
 
 /// Parachain context needed for collation.
@@ -121,6 +151,7 @@ pub trait ParachainContext: Clone {
 		&self,
 		relay_parent: Hash,
 		last_head: HeadData,
+		status: ParachainStatus,
 		ingress: I,
 	) -> Self::ProduceCandidate;
 }
@@ -143,7 +174,7 @@ pub trait RelayChainContext {
 pub fn collate<'a, R, P>(
 	relay_parent: Hash,
 	local_id: ParaId,
-	last_head: HeadData,
+	parachain_status: ParachainStatus,
 	relay_context: R,
 	para_context: P,
 	key: Arc<ed25519::Pair>,
@@ -162,6 +193,7 @@ pub fn collate<'a, R, P>(
 			para_context.produce_candidate(
 				relay_parent,
 				last_head,
+				parachain_status,
 				ingress.0.iter().flat_map(|&(id, ref msgs)| msgs.iter().cloned().map(move |msg| (id, msg)))
 			)
 				.into_future()
@@ -197,7 +229,7 @@ pub fn collate<'a, R, P>(
 
 /// Polkadot-api context.
 struct ApiContext<P, E> {
-	network: ValidationNetwork<P, E>,
+	network: Arc<ValidationNetwork<P, E, NetworkService, TaskExecutor>>,
 	parent_hash: Hash,
 	authorities: Vec<SessionKey>,
 }
@@ -293,15 +325,15 @@ impl<P, E> Worker for CollationNode<P, E> where
 			},
 		);
 
-		let validation_network = ValidationNetwork::new(
+		let validation_network = Arc::new(ValidationNetwork::new(
 			network.clone(),
 			exit.clone(),
 			message_validator,
 			client.clone(),
 			task_executor,
-		);
+		));
 
-		let parachain_context = build_parachain_context.build(&validation_network).unwrap();
+		let parachain_context = build_parachain_context.build(validation_network.clone()).unwrap();
 		let inner_exit = exit.clone();
 		let work = client.import_notification_stream()
 			.for_each(move |notification| {
@@ -327,8 +359,8 @@ impl<P, E> Worker for CollationNode<P, E> where
 
 				let work = future::lazy(move || {
 					let api = client.runtime_api();
-					let last_head = match try_fr!(api.parachain_head(&id, para_id)) {
-						Some(last_head) => last_head,
+					let status = match try_fr!(api.parachain_status(&id, para_id)) {
+						Some(status) => status,
 						None => return future::Either::A(future::ok(())),
 					};
 
@@ -349,7 +381,7 @@ impl<P, E> Worker for CollationNode<P, E> where
 					let collation_work = collate(
 						relay_parent,
 						para_id,
-						HeadData(last_head),
+						status,
 						context,
 						parachain_context,
 						key,
@@ -420,7 +452,7 @@ pub fn run_collator<P, E, I, ArgT>(
 #[cfg(test)]
 mod tests {
 	use std::collections::HashMap;
-	use polkadot_primitives::parachain::OutgoingMessage;
+	use polkadot_primitives::parachain::{OutgoingMessage, FeeSchedule};
 	use keyring::AuthorityKeyring;
 	use super::*;
 
@@ -451,6 +483,7 @@ mod tests {
 			&self,
 			_relay_parent: Hash,
 			_last_head: HeadData,
+			_status: ParachainStatus,
 			ingress: I,
 		) -> Result<(BlockData, HeadData, Extrinsic), InvalidHead> {
 			// send messages right back.
@@ -501,7 +534,14 @@ mod tests {
 		let collation = collate(
 			Default::default(),
 			id,
-			HeadData(vec![5]),
+			ParachainStatus {
+				head_data: HeadData(vec![5]),
+				balance: 10,
+				fee_schedule: FeeSchedule {
+					base: 0,
+					per_byte: 1,
+				},
+			},
 			context.clone(),
 			DummyParachainContext,
 			AuthorityKeyring::Alice.pair().into(),
