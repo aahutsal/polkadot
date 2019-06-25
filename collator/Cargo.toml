@@ -9,10 +9,10 @@ edition = "2018"
 futures = "0.1.17"
 client = { package = "substrate-client", git = "https://github.com/paritytech/substrate", branch = "bkchr-cumulus-branch" }
 parity-codec = "3.0"
-primitives = { package = "substrate-primitives", git = "https://github.com/paritytech/substrate", branch = "polkadot-master" }
-substrate-network = { git = "https://github.com/paritytech/substrate", branch = "polkadot-master" }
-consensus_common = { package = "substrate-consensus-common", git = "https://github.com/paritytech/substrate", branch = "polkadot-master" }
-aura = { package = "substrate-consensus-aura", git = "https://github.com/paritytech/substrate", branch = "polkadot-master" }
+primitives = { package = "substrate-primitives", git = "https://github.com/paritytech/substrate", branch = "bkchr-cumulus-branch" }
+substrate-network = { git = "https://github.com/paritytech/substrate", branch = "bkchr-cumulus-branch" }
+consensus_common = { package = "substrate-consensus-common", git = "https://github.com/paritytech/substrate", branch = "bkchr-cumulus-branch" }
+aura = { package = "substrate-consensus-aura", git = "https://github.com/paritytech/substrate", branch = "bkchr-cumulus-branch" }
 polkadot-runtime = { path = "../runtime", version = "0.1" }
 polkadot-primitives = { path = "../primitives", version = "0.1" }
 polkadot-cli = { path = "../cli" }
