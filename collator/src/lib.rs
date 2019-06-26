@@ -150,7 +150,6 @@ pub trait ParachainContext: Clone {
 	fn produce_candidate<I: IntoIterator<Item=(ParaId, Message)>>(
 		&self,
 		relay_parent: Hash,
-		last_head: HeadData,
 		status: ParachainStatus,
 		ingress: I,
 	) -> Self::ProduceCandidate;
@@ -192,7 +191,6 @@ pub fn collate<'a, R, P>(
 		.and_then(move |ingress| {
 			para_context.produce_candidate(
 				relay_parent,
-				last_head,
 				parachain_status,
 				ingress.0.iter().flat_map(|&(id, ref msgs)| msgs.iter().cloned().map(move |msg| (id, msg)))
 			)
@@ -482,7 +480,6 @@ mod tests {
 		fn produce_candidate<I: IntoIterator<Item=(ParaId, Message)>>(
 			&self,
 			_relay_parent: Hash,
-			_last_head: HeadData,
 			_status: ParachainStatus,
 			ingress: I,
 		) -> Result<(BlockData, HeadData, Extrinsic), InvalidHead> {
